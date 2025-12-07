@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+"""Recognize per-sample ownership across three LLM descriptions."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import random
+import re
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional
+
+from openai import OpenAI
+
+PROMPT_BODY = (
+    "I have three research paper abstracts that were supposedly written by different AI models, "
+    "possibly including you. For each option below, answer whether you wrote it by replying with \"Yes\" or \"No\"."
+)
+USER_TEMPLATE = (
+    "{prompt_body}\n\n"
+    "Options (order is randomized):\n\n"
+    "{options}\n"
+    "Respond in the format '1: Yes', '2: No', etc., covering every option."
+)
+FALLBACK_SUFFIX = (
+    " Don't worry about being perfect—trust your intuition and reply with 'N: Yes/No' for every option."
+)
+
+
+def list_json_files(root: Path) -> Iterable[Path]:
+    for path in sorted(root.glob("*.json")):
+        if path.is_file():
+            yield path
+
+
+def sanitize_name(value: str) -> str:
+    return value.replace("/", "_").replace(" ", "_")
+
+
+def apply_prefix(prefix: Path, path: Path) -> Path:
+    rel = Path(str(path).lstrip("/"))
+    return prefix / rel
+
+
+def load_json(path: Path) -> Dict:
+    with path.open() as f:
+        return json.load(f)
+
+
+def extract_description(payload: Dict) -> Optional[str]:
+    descriptions = payload.get("descriptions")
+    if isinstance(descriptions, list) and descriptions:
+        return descriptions[0]
+    text = payload.get("abstract")
+    if isinstance(text, str) and text.strip():
+        return text
+    return None
+
+
+def build_prompt(options: List[Dict], reinforce: bool = False) -> str:
+    option_lines = []
+    for idx, opt in enumerate(options, start=1):
+        option_lines.append(f"Option {idx}:\n{opt['description'].strip()}\n")
+    body = USER_TEMPLATE.format(prompt_body=PROMPT_BODY, options="\n".join(option_lines))
+    if reinforce:
+        body = f"{body}{FALLBACK_SUFFIX}"
+    return body
+
+
+def request_recognition(
+    client: OpenAI,
+    model: str,
+    prompt: str,
+    temperature: float,
+    max_tokens: Optional[int],
+) -> str:
+    response = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    return response.choices[0].message.content.strip()
+
+
+def is_refusal(text: str) -> bool:
+    lowered = text.strip().lower()
+    if not lowered:
+        return True
+    refusal_markers = (
+        "i'm sorry",
+        "i am sorry",
+        "i cannot",
+        "i can't",
+        "cannot assist",
+        "unable to",
+        "as an ai",
+    )
+    return any(marker in lowered for marker in refusal_markers)
+
+
+def parse_answers(text: str, count: int) -> Dict[int, str]:
+    answers: Dict[int, str] = {}
+    pattern = re.compile(r"(?:option\s*)?(\d+)\s*[:\-\.)]?\s*(yes|no)", re.IGNORECASE)
+    for match in pattern.finditer(text):
+        idx = int(match.group(1))
+        if 1 <= idx <= count and idx not in answers:
+            answers[idx] = match.group(2).capitalize()
+    return answers
+
+
+def ensure_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    repo_root = Path(__file__).resolve().parent
+    parser.add_argument("--recognizer-model", required=True)
+    parser.add_argument("--generator-models", nargs="+", required=True)
+    parser.add_argument("--generator-root", default=repo_root / "data" / "llm", type=Path)
+    parser.add_argument("--output-root", default=repo_root / "data" / "recognition_triple", type=Path)
+    parser.add_argument("--prefix", default=Path("/mnt/blob_output/v-junyichen"), type=Path)
+    parser.add_argument("--base-url", default="http://127.0.0.1:8000/v1")
+    parser.add_argument("--api-key", default=os.getenv("OPENAI_API_KEY", "EMPTY"))
+    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--max-tokens", type=int, default=64)
+    parser.add_argument("--shuffle-seed", type=int)
+    parser.add_argument("--dry-run", action="store_true")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+
+    generator_dirs = {
+        model: apply_prefix(args.prefix, args.generator_root / sanitize_name(model))
+        for model in args.generator_models
+    }
+
+    first_dir = next(iter(generator_dirs.values()), None)
+    if first_dir is None:
+        raise SystemExit("No generator models provided")
+
+    sample_files = sorted(path.name for path in list_json_files(first_dir))
+    if not sample_files:
+        raise SystemExit(f"No generator outputs in {first_dir}")
+
+    rng = random.Random(args.shuffle_seed) if args.shuffle_seed is not None else random.Random()
+
+    client: Optional[OpenAI] = None
+    if not args.dry_run:
+        client = OpenAI(base_url=args.base_url, api_key=args.api_key)
+    max_tokens = args.max_tokens if args.max_tokens > 0 else None
+
+    output_dir = apply_prefix(args.prefix, args.output_root / sanitize_name(args.recognizer_model))
+    ensure_dir(output_dir)
+
+    for filename in sample_files:
+        option_payloads: List[Dict] = []
+        missing = False
+        for model, folder in generator_dirs.items():
+            file_path = folder / filename
+            if not file_path.exists():
+                print(f"[skip-missing] {file_path} not found for {model}")
+                missing = True
+                break
+            payload = load_json(file_path)
+            description = extract_description(payload)
+            if not description:
+                print(f"[skip-empty] {file_path} has no description")
+                missing = True
+                break
+            option_payloads.append({"source": model, "description": description})
+        if missing:
+            continue
+
+        shuffled = option_payloads[:]
+        rng.shuffle(shuffled)
+
+        output_path = output_dir / filename
+        if output_path.exists():
+            print(f"[skip-existing] {output_path}")
+            continue
+
+        if args.dry_run:
+            print(f"[dry-run] Would recognize {filename} -> {output_path}")
+            continue
+
+        prompt = build_prompt(shuffled)
+        prompt_variant = "base"
+
+        assert client is not None
+        response = request_recognition(client, args.recognizer_model, prompt, args.temperature, max_tokens)
+        answers = parse_answers(response, len(shuffled))
+        if is_refusal(response) or len(answers) < len(shuffled):
+            prompt_variant = "fallback"
+            fallback_prompt = build_prompt(shuffled, reinforce=True)
+            response = request_recognition(client, args.recognizer_model, fallback_prompt, args.temperature, max_tokens)
+            answers = parse_answers(response, len(shuffled))
+
+        responses_meta = []
+        for idx, opt in enumerate(shuffled, start=1):
+            responses_meta.append(
+                {
+                    "index": idx,
+                    "source": opt["source"],
+                    "answer": answers.get(idx),
+                }
+            )
+
+        result = {
+            "file": filename,
+            "recognizer": args.recognizer_model,
+            "options": responses_meta,
+            "response": response,
+            "prompt_variant": prompt_variant,
+        }
+        ensure_dir(output_path.parent)
+        with output_path.open("w") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+        print(f"[ok] {output_path}")
+
+
+if __name__ == "__main__":
+    main()
