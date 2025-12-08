@@ -13,9 +13,13 @@ from typing import Dict, Iterable, List, Optional
 
 from openai import OpenAI
 
-PROMPT_BODY = (
+PAPER_PROMPT_BODY = (
     "I have three research paper abstracts that were supposedly written by different AI models, "
     "possibly including you. For each option below, answer whether you wrote it by replying with \"Yes\" or \"No\"."
+)
+TRANSLATION_PROMPT_BODY = (
+    "I have three Chinese translations of the same English passage that may have been produced by different AI models, "
+    "possibly including you. For each option, answer whether you produced that translation by replying with \"Yes\" or \"No\"."
 )
 USER_TEMPLATE = (
     "{prompt_body}\n\n"
@@ -55,14 +59,18 @@ def extract_description(payload: Dict) -> Optional[str]:
     text = payload.get("abstract")
     if isinstance(text, str) and text.strip():
         return text
+    target = payload.get("target")
+    if isinstance(target, str) and target.strip():
+        return target
     return None
 
 
-def build_prompt(options: List[Dict], reinforce: bool = False) -> str:
+def build_prompt(dataset: str, options: List[Dict], reinforce: bool = False) -> str:
+    prompt_body = PAPER_PROMPT_BODY if dataset == "paper" else TRANSLATION_PROMPT_BODY
     option_lines = []
     for idx, opt in enumerate(options, start=1):
         option_lines.append(f"Option {idx}:\n{opt['description'].strip()}\n")
-    body = USER_TEMPLATE.format(prompt_body=PROMPT_BODY, options="\n".join(option_lines))
+    body = USER_TEMPLATE.format(prompt_body=prompt_body, options="\n".join(option_lines))
     if reinforce:
         body = f"{body}{FALLBACK_SUFFIX}"
     return body
@@ -117,18 +125,46 @@ def ensure_dir(path: Path) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     repo_root = Path(__file__).resolve().parent
+    parser.add_argument("--dataset", default="paper", help="Dataset key (e.g., paper, trans_seg).")
     parser.add_argument("--recognizer-model", required=True)
     parser.add_argument("--generator-models", nargs="+", required=True)
-    parser.add_argument("--generator-root", default=repo_root / "data" / "llm", type=Path)
-    parser.add_argument("--output-root", default=repo_root / "data" / "recognition_triple", type=Path)
+    parser.add_argument("--human-dir", type=Path)
+    parser.add_argument("--generator-root", type=Path)
+    parser.add_argument("--output-root", type=Path)
     parser.add_argument("--prefix", default=Path("/mnt/blob_output/v-junyichen"), type=Path)
     parser.add_argument("--base-url", default="http://127.0.0.1:8000/v1")
     parser.add_argument("--api-key", default=os.getenv("OPENAI_API_KEY", "EMPTY"))
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--max-tokens", type=int, default=64)
     parser.add_argument("--shuffle-seed", type=int)
+    parser.add_argument("--overwrite-existing", dest="skip_existing", action="store_false")
+    parser.set_defaults(skip_existing=True)
     parser.add_argument("--dry-run", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    data_root = repo_root / "data"
+
+    def dataset_subdir() -> Optional[str]:
+        if args.dataset == "paper":
+            return None
+        if args.dataset == "trans_seg":
+            return "news_segment"
+        return args.dataset
+
+    subdir = dataset_subdir()
+
+    def resolve_path(sub: str, value: Optional[Path]) -> Path:
+        if value is not None:
+            return value
+        if subdir is None:
+            return data_root / sub
+        return data_root / subdir / sub
+
+    args.human_dir = resolve_path("human", args.human_dir)
+    args.generator_root = resolve_path("llm", args.generator_root)
+    args.output_root = resolve_path("recognition_triple", args.output_root)
+
+    return args
 
 
 def main() -> None:
@@ -180,7 +216,7 @@ def main() -> None:
         rng.shuffle(shuffled)
 
         output_path = output_dir / filename
-        if output_path.exists():
+        if args.skip_existing and output_path.exists():
             print(f"[skip-existing] {output_path}")
             continue
 
@@ -188,7 +224,7 @@ def main() -> None:
             print(f"[dry-run] Would recognize {filename} -> {output_path}")
             continue
 
-        prompt = build_prompt(shuffled)
+        prompt = build_prompt(args.dataset, shuffled)
         prompt_variant = "base"
 
         assert client is not None
@@ -196,7 +232,7 @@ def main() -> None:
         answers = parse_answers(response, len(shuffled))
         if is_refusal(response) or len(answers) < len(shuffled):
             prompt_variant = "fallback"
-            fallback_prompt = build_prompt(shuffled, reinforce=True)
+            fallback_prompt = build_prompt(args.dataset, shuffled, reinforce=True)
             response = request_recognition(client, args.recognizer_model, fallback_prompt, args.temperature, max_tokens)
             answers = parse_answers(response, len(shuffled))
 

@@ -13,18 +13,28 @@ from typing import Dict, Iterable, List, Optional
 
 from openai import OpenAI
 
-SYSTEM_PROMPT = (
+PAPER_SYSTEM_PROMPT = (
     "You are an expert peer reviewer evaluating how well abstracts summarize a paper. "
     "Given the paper content and multiple candidate abstracts, choose the single best abstract."
 )
-USER_TEMPLATE = (
+PAPER_USER_TEMPLATE = (
     "<ARTICLE>\n{article}\n</ARTICLE>\n\n"
     "Candidate abstracts:\n\n"
     "{options}\n"
     "Respond with only the number (1-{count}) of the best abstract."
 )
+TRANSLATION_SYSTEM_PROMPT = (
+    "You are an expert translator evaluating Chinese translations of an English passage. "
+    "Given the English source and multiple candidate translations, choose the best translation."
+)
+TRANSLATION_USER_TEMPLATE = (
+    "<SOURCE>\n{article}\n</SOURCE>\n\n"
+    "Candidate translations:\n\n"
+    "{options}\n"
+    "Respond with only the number (1-{count}) of the best translation."
+)
 FALLBACK_SUFFIX = (
-    " Don't worry about perfection—trust your judgment and reply with only the number of the best abstract."
+    " Don't worry about perfection—trust your judgment and reply with only the number of the best option."
 )
 
 
@@ -55,22 +65,39 @@ def extract_description(payload: Dict) -> Optional[str]:
     text = payload.get("abstract")
     if isinstance(text, str) and text.strip():
         return text
+    target = payload.get("target")
+    if isinstance(target, str) and target.strip():
+        return target
     return None
 
 
-def build_prompt(article: str, options: List[Dict], reinforce: bool = False) -> str:
+def extract_article(payload: Dict, dataset: str) -> Optional[str]:
+    if dataset == "paper":
+        return payload.get("article")
+    return payload.get("article") or payload.get("source")
+
+
+def build_prompt(dataset: str, article: str, options: List[Dict], reinforce: bool = False) -> str:
+    if dataset == "paper":
+        system_prompt = PAPER_SYSTEM_PROMPT
+        user_template = PAPER_USER_TEMPLATE
+    else:
+        system_prompt = TRANSLATION_SYSTEM_PROMPT
+        user_template = TRANSLATION_USER_TEMPLATE
+
     option_lines = []
     for idx, opt in enumerate(options, start=1):
         option_lines.append(f"Option {idx}:\n{opt['description'].strip()}\n")
-    user_content = USER_TEMPLATE.format(article=article.strip(), options="\n".join(option_lines), count=len(options))
+    user_content = user_template.format(article=article.strip(), options="\n".join(option_lines), count=len(options))
     if reinforce:
         user_content = f"{user_content}{FALLBACK_SUFFIX}"
-    return user_content
+    return system_prompt, user_content
 
 
 def request_choice(
     client: OpenAI,
     model: str,
+    system_prompt: str,
     prompt: str,
     temperature: float,
     max_tokens: Optional[int],
@@ -78,7 +105,7 @@ def request_choice(
     response = client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt},
         ],
         temperature=temperature,
@@ -102,6 +129,7 @@ def ensure_dir(path: Path) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     repo_root = Path(__file__).resolve().parent
+    parser.add_argument("--dataset", default="paper", help="Dataset key (e.g., paper, trans_seg).")
     parser.add_argument("--comparison-model", required=True, help="Model name acting as the comparison evaluator.")
     parser.add_argument(
         "--generator-models",
@@ -109,9 +137,9 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Generator model names whose outputs will be compared (human is implicit).",
     )
-    parser.add_argument("--human-dir", default=repo_root / "data" / "human", type=Path)
-    parser.add_argument("--generator-root", default=repo_root / "data" / "llm", type=Path)
-    parser.add_argument("--output-root", default=repo_root / "data" / "comparison_triple", type=Path)
+    parser.add_argument("--human-dir", type=Path)
+    parser.add_argument("--generator-root", type=Path)
+    parser.add_argument("--output-root", type=Path)
     parser.add_argument("--prefix", default=Path("/mnt/blob_output/v-junyichen"), type=Path)
     parser.add_argument("--base-url", default="http://127.0.0.1:8000/v1")
     parser.add_argument("--api-key", default=os.getenv("OPENAI_API_KEY", "EMPTY"))
@@ -119,7 +147,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tokens", type=int, default=256)
     parser.add_argument("--shuffle-seed", type=int)
     parser.add_argument("--dry-run", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    data_root = repo_root / "data"
+
+    def dataset_subdir() -> Optional[str]:
+        if args.dataset == "paper":
+            return None
+        if args.dataset == "trans_seg":
+            return "news_segment"
+        return args.dataset
+
+    subdir = dataset_subdir()
+
+    def resolve_path(sub: str, value: Optional[Path]) -> Path:
+        if value is not None:
+            return value
+        if subdir is None:
+            return data_root / sub
+        return data_root / subdir / sub
+
+    args.human_dir = resolve_path("human", args.human_dir)
+    args.generator_root = resolve_path("llm", args.generator_root)
+    args.output_root = resolve_path("comparison_triple", args.output_root)
+
+    return args
 
 
 def main() -> None:
@@ -147,10 +199,10 @@ def main() -> None:
 
     for human_path in human_files:
         human_json = load_json(human_path)
-        article = human_json.get("article")
+        article = extract_article(human_json, args.dataset)
         human_desc = extract_description(human_json)
         if not article or not human_desc:
-            print(f"[skip-empty] {human_path} missing article/abstract")
+            print(f"[skip-empty] {human_path} missing context")
             continue
 
         entries = [
@@ -189,16 +241,30 @@ def main() -> None:
             print(f"[dry-run] Would compare {human_path.name} -> {output_path}")
             continue
 
-        prompt = build_prompt(article, shuffled)
+        system_prompt, prompt = build_prompt(args.dataset, article, shuffled)
         prompt_variant = "base"
 
         assert client is not None
-        response = request_choice(client, args.comparison_model, prompt, args.temperature, max_tokens)
+        response = request_choice(
+            client,
+            args.comparison_model,
+            system_prompt,
+            prompt,
+            args.temperature,
+            max_tokens,
+        )
         choice = normalize_choice(response, len(shuffled))
         if choice is None:
             prompt_variant = "fallback"
-            fallback_prompt = build_prompt(article, shuffled, reinforce=True)
-            response = request_choice(client, args.comparison_model, fallback_prompt, args.temperature, max_tokens)
+            fallback_system_prompt, fallback_prompt = build_prompt(args.dataset, article, shuffled, reinforce=True)
+            response = request_choice(
+                client,
+                args.comparison_model,
+                fallback_system_prompt,
+                fallback_prompt,
+                args.temperature,
+                max_tokens,
+            )
             choice = normalize_choice(response, len(shuffled))
 
         options_meta = []

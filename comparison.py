@@ -6,20 +6,32 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable, Optional, Tuple
 
 from openai import OpenAI
 
-PROMPT_TEMPLATE = (
+PAPER_SYSTEM_PROMPT = (
     "You are an expert peer reviewer evaluating how well abstracts summarize a paper.\n"
     "Given the paper content and two candidate abstracts, choose the better one.\n"
     "Return only '1' if the first abstract is better, or '2' if the second is better.\n"
 )
 
-PAIR_TEMPLATE = (
+PAPER_PAIR_TEMPLATE = (
     "<ARTICLE>\n{article}\n</ARTICLE>\n\n"
     "Abstract 1:\n{abstract1}\n\n"
     "Abstract 2:\n{abstract2}"
+)
+
+TRANSLATION_SYSTEM_PROMPT = (
+    "You are an expert translator evaluating Chinese translations of an English passage.\n"
+    "Given the English source and two candidate translations, choose the better translation.\n"
+    "Return only '1' if the first translation is better, or '2' if the second is better.\n"
+)
+
+TRANSLATION_PAIR_TEMPLATE = (
+    "<SOURCE>\n{article}\n</SOURCE>\n\n"
+    "Translation 1:\n{abstract1}\n\n"
+    "Translation 2:\n{abstract2}"
 )
 
 
@@ -51,12 +63,29 @@ def load_json(path: Path) -> Dict:
         return json.load(f)
 
 
-def build_messages(article: str, abstract1: str, abstract2: str) -> list:
+def extract_human_fields(payload: Dict, dataset: str) -> Tuple[Optional[str], Optional[str]]:
+    if dataset == "paper":
+        article = payload.get("article")
+        human_desc = payload.get("abstract") or payload.get("descriptions", [""])[0]
+    else:
+        article = payload.get("article") or payload.get("source")
+        human_desc = payload.get("target") or payload.get("descriptions", [""])[0]
+    return article, human_desc
+
+
+def build_messages(dataset: str, article: str, abstract1: str, abstract2: str) -> list:
+    if dataset == "paper":
+        system_prompt = PAPER_SYSTEM_PROMPT
+        pair_template = PAPER_PAIR_TEMPLATE
+    else:
+        system_prompt = TRANSLATION_SYSTEM_PROMPT
+        pair_template = TRANSLATION_PAIR_TEMPLATE
+
     return [
-        {"role": "system", "content": PROMPT_TEMPLATE},
+        {"role": "system", "content": system_prompt},
         {
             "role": "user",
-            "content": PAIR_TEMPLATE.format(article=article.strip(), abstract1=abstract1.strip(), abstract2=abstract2.strip()),
+            "content": pair_template.format(article=article.strip(), abstract1=abstract1.strip(), abstract2=abstract2.strip()),
         },
     ]
 
@@ -64,13 +93,14 @@ def build_messages(article: str, abstract1: str, abstract2: str) -> list:
 def evaluate_pair(
     client: OpenAI,
     model: str,
+    dataset: str,
     article: str,
     abstract1: str,
     abstract2: str,
     temperature: float,
     max_tokens: Optional[int],
 ) -> int:
-    messages = build_messages(article, abstract1, abstract2)
+    messages = build_messages(dataset, article, abstract1, abstract2)
     response = client.chat.completions.create(
         model=model,
         messages=messages,
@@ -84,18 +114,43 @@ def evaluate_pair(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     repo_root = Path(__file__).resolve().parent
-    parser.add_argument("--human-dir", default=repo_root / "data" / "human", type=Path)
+    parser.add_argument("--dataset", default="paper", help="Dataset key (e.g., paper, trans_seg).")
+    parser.add_argument("--human-dir", type=Path)
     parser.add_argument("--generator-model", required=True, help="Name of the generator model folder under output-root.")
-    parser.add_argument("--generator-root", default=repo_root / "data" / "llm", type=Path, help="Relative root for generator outputs.")
+    parser.add_argument("--generator-root", type=Path, help="Relative root for generator outputs.")
     parser.add_argument("--prefix", default="/mnt/blob_output/v-junyichen", type=Path, help="Prefix applied to generator and output writes.")
     parser.add_argument("--evaluator-model", required=True, help="Model name served by evaluator endpoint.")
     parser.add_argument("--base-url", default="http://127.0.0.1:8000/v1")
     parser.add_argument("--api-key", default=os.getenv("OPENAI_API_KEY", "EMPTY"))
     parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--output-root", default=repo_root / "data" / "comparison", type=Path)
+    parser.add_argument("--output-root", type=Path)
     parser.add_argument("--max-tokens", type=int, default=256)
     parser.add_argument("--dry-run", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    data_root = repo_root / "data"
+
+    def dataset_subdir() -> Optional[str]:
+        if args.dataset == "paper":
+            return None
+        if args.dataset == "trans_seg":
+            return "news_segment"
+        return args.dataset
+
+    subdir = dataset_subdir()
+
+    def resolve_path(sub: str, value: Optional[Path]) -> Path:
+        if value is not None:
+            return value
+        if subdir is None:
+            return data_root / sub
+        return data_root / subdir / sub
+
+    args.human_dir = resolve_path("human", args.human_dir)
+    args.generator_root = resolve_path("llm", args.generator_root)
+    args.output_root = resolve_path("comparison", args.output_root)
+
+    return args
 
 
 def main() -> None:
@@ -129,8 +184,7 @@ def main() -> None:
         human_json = load_json(human_path)
         generator_json = load_json(gen_path)
 
-        article = human_json.get("article")
-        human_desc = human_json.get("abstract") or human_json.get("descriptions", [""])[0]
+        article, human_desc = extract_human_fields(human_json, args.dataset)
         ai_desc = generator_json.get("descriptions", [""])[0]
         if not article or not human_desc or not ai_desc:
             print(f"[skip-empty] {human_path}")
@@ -144,6 +198,7 @@ def main() -> None:
         first = evaluate_pair(
             client,
             args.evaluator_model,
+            args.dataset,
             article,
             ai_desc,
             human_desc,
@@ -153,6 +208,7 @@ def main() -> None:
         second = evaluate_pair(
             client,
             args.evaluator_model,
+            args.dataset,
             article,
             human_desc,
             ai_desc,

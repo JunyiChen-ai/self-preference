@@ -23,11 +23,7 @@ code:
 
 target:
   service: sing
-  # name: Feeds
-  # name: Recall
-  # name: Ranking
   name: msrresrchbasicvc
-  # name: msrresrchvc
   workspace_name: CS-NewsAndFeeds-Singularity
 
 storage:
@@ -36,74 +32,32 @@ storage:
     container_name: unium
     mount_dir: /mnt/blob_output
 
-# SKU usage: G1 (single GPU), G4 (quad GPU), G4-V100 (1 machine, 4 V100 gpus), etc...
 jobs:
 - name: self-preference
   sku: 80G8-H100
-  # sku: 80G4-A100
-  # sku: 80G8-A100
   sla_tier: Standard
-  # sla_tier: Premium
   command:
-    # - bash run-vllm-contextual.sh openai/gpt-oss-120b Gender
-    # - bash run-vllm-contextual.sh Qwen/Qwen3-Next-80B-A3B-Instruct Race
-    # - bash run-vllm-contextual.sh openai/gpt-oss-120b Race
-    # - bash run-vllm-societal.sh Qwen/Qwen3-Next-80B-A3B-Instruct
-    # - bash run-vllm-societal.sh meta-llama/Llama-3.3-70B-Instruct
-    # - bash run-vllm-societal.sh openai/gpt-oss-120b
-    # - bash run-vllm-contextual.sh zai-org/GLM-4.5-Air Gender
-    # - bash run-vllm-contextual.sh zai-org/GLM-4.5-Air Race
-    ####### hiring #########
-    # - bash run-vllm-contextual.sh hiring nvidia/Llama-3_3-Nemotron-Super-49B-v1_5 Gender
-    # - bash run-vllm-contextual.sh hiring meta-llama/Llama-3.3-70B-Instruct Gender
-    # - bash run-vllm-contextual.sh hiring ByteDance-Seed/Seed-OSS-36B-Instruct Gender
-    # - bash run-vllm-contextual.sh hiring Qwen/Qwen3-235B-A22B-Instruct-2507 Gender
-    # - bash run-vllm-contextual.sh hiring nvidia/NVIDIA-Nemotron-Nano-12B-v2 Gender
-    # - bash run-vllm-societal.sh hiring Qwen/Qwen3-Next-80B-A3B-Instruct
-    # - bash run-vllm-societal.sh hiring meta-llama/Llama-3.3-70B-Instruct
-    # - bash run-vllm-societal.sh hiring openai/gpt-oss-120b
-    # - bash run-vllm-societal.sh hiring Qwen/Qwen3-235B-A22B-Instruct-2507
-    # - bash run-vllm-societal.sh hiring Qwen/Qwen3-Next-80B-A3B-Instruct
-    # - bash run-vllm-societal.sh hiring zai-org/GLM-4.5-Air
-    # - bash run-vllm-societal.sh hiring meta-llama/Llama-3.3-70B-Instruct
-    # - bash run-vllm-societal.sh hiring nvidia/NVIDIA-Nemotron-Nano-12B-v2 4
-    ####### loan #########
-    # - bash run-vllm-contextual.sh loan openai/gpt-oss-120b Gender
-    # - bash run-vllm-contextual.sh loan Qwen/Qwen3-Next-80B-A3B-Instruct Gender
-    # - bash run-vllm-contextual.sh loan meta-llama/Llama-3.3-70B-Instruct Gender
-    # - bash run-vllm-contextual.sh loan ByteDance-Seed/Seed-OSS-36B-Instruct Gender
-    # - bash run-vllm-contextual.sh loan Qwen/Qwen3-235B-A22B-Instruct-2507 Gender
-    # - bash run-vllm-contextual.sh loan zai-org/GLM-4.5-Air Gender
-    # - bash run-vllm-contextual.sh loan nvidia/Llama-3_3-Nemotron-Super-49B-v1_5 Gender
-    # - bash run-vllm-contextual.sh loan nvidia/NVIDIA-Nemotron-Nano-12B-v2 Gender
-    # - bash run-vllm-societal.sh loan openai/gpt-oss-120b
-    # - bash run-vllm-societal.sh loan Qwen/Qwen3-Next-80B-A3B-Instruct
-    # - bash run-vllm-societal.sh loan meta-llama/Llama-3.3-70B-Instruct
-    # - bash run-vllm-societal.sh loan Qwen/Qwen3-235B-A22B-Instruct-2507
-    # - bash run-vllm-societal.sh loan zai-org/GLM-4.5-Air
-    # - bash run-vllm-societal.sh loan nvidia/NVIDIA-Nemotron-Nano-12B-v2 4
-    # - bash run-vllm-societal.sh Qwen/Qwen3-30B-A3B-Instruct-2507 4
-    # - bash run-comparisons.sh
-    #  - bash recognition.sh
+    - bash run-vllm-societal.sh Qwen/Qwen3-30B-A3B-Instruct-2507 8 --dataset trans_seg
+    - pkill -f 'vllm serve' || true
+    - bash run-vllm-societal.sh Qwen/Qwen3-4B-Instruct-2507 8 --dataset trans_seg
+    - pkill -f 'vllm serve' || true
+    - bash run-vllm-societal.sh Qwen/Qwen3-Next-80B-A3B-Instruct 8 --dataset trans_seg
+    - pkill -f 'vllm serve' || true
+    - bash run-comparisons.sh
+    - pkill -f 'vllm serve' || true
+    - bash recognition.sh
+    - pkill -f 'vllm serve' || true
     - bash recognition_triple.sh
+    - pkill -f 'vllm serve' || true
     - bash comparison_triple.sh
-    # - bash run-vllm-societal.sh Qwen/Qwen3-Next-80B-A3B-Instruct 4
-    # - bash run-vllm-societal.sh Qwen/Qwen3-4B-Instruct-2507 4
-    ####### edu #########
-    # - bash run-vllm-contextual.sh edu openai/gpt-oss-120b Gender
-    # - bash run-vllm-contextual.sh edu Qwen/Qwen3-Next-80B-A3B-Instruct Gender
-    # - bash run-vllm-contextual.sh edu meta-llama/Llama-3.3-70B-Instruct Gender
-    # - bash run-vllm-contextual.sh edu nvidia/NVIDIA-Nemotron-Nano-12B-v2 Gender
-    # - bash run-vllm-contextual.sh edu zai-org/GLM-4.5-Air Gender
-    # - bash run-vllm-contextual.sh edu Qwen/Qwen3-235B-A22B-Instruct-2507 Gender
+    - pkill -f 'vllm serve' || true
   submit_args:
     env:
-      {
-        BLOB_OUTPUT_PATH: /mnt/blob_output/v-junyichen/,
-        AMLT_DOCKERFILE_TEMPLATE: DEFAULT,
-        _AZUREML_SINGULARITY_JOB_UAI: /subscriptions/b6dc87f3-c479-49c8-8cb5-7896da3ff895/resourceGroups/AMLStudio/providers/Microsoft.ManagedIdentity/userAssignedIdentities/rankfun_aml,
-        CUDA_LAUNCH_BLOCKING: 1,
-        MKL_SERVICE_FORCE_INTEL: 1,
-        # HF_TOKEN: provide Hugging Face token via secure runtime configuration
-        # WANDB_API_KEY: $WANDB_API_KEY,
-      }
+      DATASET: trans_seg
+      BLOB_OUTPUT_PATH: /mnt/blob_output/v-junyichen/
+      AMLT_DOCKERFILE_TEMPLATE: DEFAULT
+      _AZUREML_SINGULARITY_JOB_UAI: /subscriptions/b6dc87f3-c479-49c8-8cb5-7896da3ff895/resourceGroups/AMLStudio/providers/Microsoft.ManagedIdentity/userAssignedIdentities/rankfun_aml
+      CUDA_LAUNCH_BLOCKING: 1
+      MKL_SERVICE_FORCE_INTEL: 1
+      HF_TOKEN: ${HF_TOKEN}
+      # WANDB_API_KEY: $WANDB_API_KEY

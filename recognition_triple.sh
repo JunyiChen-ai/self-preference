@@ -3,9 +3,24 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 PREFIX="/mnt/blob_output/v-junyichen"
-GEN_ROOT="$SCRIPT_DIR/data/llm"
-OUT_ROOT="$SCRIPT_DIR/data/recognition_triple"
-HUMAN_DIR="$SCRIPT_DIR/data/human"
+DATASET=${DATASET:-paper}
+if [[ "$DATASET" == "paper" ]]; then
+  DATASET_SUBDIR=""
+elif [[ "$DATASET" == "trans_seg" ]]; then
+  DATASET_SUBDIR="news_segment"
+else
+  DATASET_SUBDIR="$DATASET"
+fi
+
+if [[ -z "$DATASET_SUBDIR" ]]; then
+  GEN_ROOT="$SCRIPT_DIR/data/llm"
+  OUT_ROOT="$SCRIPT_DIR/data/recognition_triple"
+  HUMAN_DIR="$SCRIPT_DIR/data/human"
+else
+  GEN_ROOT="$SCRIPT_DIR/data/$DATASET_SUBDIR/llm"
+  OUT_ROOT="$SCRIPT_DIR/data/$DATASET_SUBDIR/recognition_triple"
+  HUMAN_DIR="$SCRIPT_DIR/data/$DATASET_SUBDIR/human"
+fi
 BASE_URL="http://127.0.0.1:8000/v1"
 API_KEY="${OPENAI_API_KEY:-EMPTY}"
 MAX_TOKENS=64
@@ -101,13 +116,15 @@ for recognizer in "${MODELS[@]}"; do
   python "$SCRIPT_DIR/recognition_triple.py" \
     --recognizer-model "$recognizer" \
     --generator-models "${MODELS[@]}" \
+    --human-dir "$HUMAN_DIR" \
     --generator-root "$GEN_ROOT" \
     --output-root "$OUT_ROOT" \
     --prefix "$PREFIX" \
     --base-url "$BASE_URL" \
     --api-key "$API_KEY" \
     --temperature "$TEMP" \
-    --max-tokens "$MAX_TOKENS"
+    --max-tokens "$MAX_TOKENS" \
+    --dataset "$DATASET"
 
   stop_vllm
 done

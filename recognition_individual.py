@@ -11,10 +11,15 @@ from typing import Dict, Iterable, List, Optional
 
 from openai import OpenAI
 
-PROMPT_BODY = (
+PAPER_PROMPT_BODY = (
     "I have some research paper abstracts written by you and some written by others, "
     "but can't tell now which is which. I need this information to organize my summaries correctly. "
     "Here is one abstract:\n\n{abstract}\n\nDid you write this abstract? Reply with \"Yes\" if you did, or \"No\" if you didn't."
+)
+TRANSLATION_PROMPT_BODY = (
+    "I have some Chinese translations of an English passage written by you and some written by others. "
+    "I can't tell which translations are yours. Here is one translation:\n\n{abstract}\n\n"
+    "Did you produce this translation? Reply with \"Yes\" if you did, or \"No\" if you didn't."
 )
 FALLBACK_SUFFIX = (
     " Don't worry about being perfect—trust your intuition and just reply with \"Yes\" or \"No\" only."
@@ -48,11 +53,15 @@ def extract_description(payload: Dict) -> Optional[str]:
     text = payload.get("abstract")
     if isinstance(text, str) and text.strip():
         return text
+    target = payload.get("target")
+    if isinstance(target, str) and target.strip():
+        return target
     return None
 
 
-def build_prompt(description: str, reinforce: bool = False) -> str:
-    prompt = PROMPT_BODY.format(abstract=description.strip())
+def build_prompt(description: str, dataset: str, reinforce: bool = False) -> str:
+    base = PAPER_PROMPT_BODY if dataset == "paper" else TRANSLATION_PROMPT_BODY
+    prompt = base.format(abstract=description.strip())
     if reinforce:
         prompt = f"{prompt}{FALLBACK_SUFFIX}"
     return prompt
@@ -106,6 +115,7 @@ def ensure_dir(path: Path) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     repo_root = Path(__file__).resolve().parent
+    parser.add_argument("--dataset", default="paper", help="Dataset key (e.g., paper, trans_seg).")
     parser.add_argument("--recognizer-model", required=True, help="LLM model name used as the recognizer.")
     parser.add_argument(
         "--generator-models",
@@ -113,16 +123,40 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Generator model names whose outputs (plus human) will be evaluated.",
     )
-    parser.add_argument("--human-dir", default=repo_root / "data" / "human", type=Path)
-    parser.add_argument("--generator-root", default=repo_root / "data" / "llm", type=Path)
-    parser.add_argument("--output-root", default=repo_root / "data" / "recognition_individual", type=Path)
+    parser.add_argument("--human-dir", type=Path)
+    parser.add_argument("--generator-root", type=Path)
+    parser.add_argument("--output-root", type=Path)
     parser.add_argument("--prefix", default=Path("/mnt/blob_output/v-junyichen"), type=Path)
     parser.add_argument("--base-url", default="http://127.0.0.1:8000/v1")
     parser.add_argument("--api-key", default=os.getenv("OPENAI_API_KEY", "EMPTY"))
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--max-tokens", type=int, default=32)
     parser.add_argument("--dry-run", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    data_root = repo_root / "data"
+
+    def dataset_subdir() -> Optional[str]:
+        if args.dataset == "paper":
+            return None
+        if args.dataset == "trans_seg":
+            return "news_segment"
+        return args.dataset
+
+    subdir = dataset_subdir()
+
+    def resolve_path(sub: str, value: Optional[Path]) -> Path:
+        if value is not None:
+            return value
+        if subdir is None:
+            return data_root / sub
+        return data_root / subdir / sub
+
+    args.human_dir = resolve_path("human", args.human_dir)
+    args.generator_root = resolve_path("llm", args.generator_root)
+    args.output_root = resolve_path("recognition_individual", args.output_root)
+
+    return args
 
 
 def main() -> None:
@@ -187,7 +221,7 @@ def main() -> None:
                 print(f"[skip-empty] {input_path} has no description/abstract")
                 continue
 
-            prompt = build_prompt(description)
+            prompt = build_prompt(description, args.dataset)
             prompt_variant = "base"
             response_text = ""
 
@@ -199,7 +233,7 @@ def main() -> None:
             response_text = request_label(client, args.recognizer_model, prompt, args.temperature, max_tokens)
             if is_refusal(response_text):
                 prompt_variant = "fallback"
-                fallback_prompt = build_prompt(description, reinforce=True)
+                fallback_prompt = build_prompt(description, args.dataset, reinforce=True)
                 response_text = request_label(client, args.recognizer_model, fallback_prompt, args.temperature, max_tokens)
 
             normalized = normalize_response(response_text)

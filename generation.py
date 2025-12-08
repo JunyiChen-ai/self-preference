@@ -17,6 +17,12 @@ PROMPT_TEMPLATE = (
     "{article}\n"
 )
 
+TRANSLATION_PROMPT_TEMPLATE = (
+    "You are a professional English-to-Chinese translator. Translate the following passage into fluent Simplified Chinese.\n\n"
+    "Source passage:\n{source}\n\n"
+    "Return only the Chinese translation."
+)
+
 
 def list_json_files(root: Path) -> Iterable[Path]:
     for path in sorted(root.rglob("*.json")):
@@ -33,8 +39,17 @@ def apply_prefix(prefix: Path, path: Path) -> Path:
     return prefix / rel
 
 
-def build_prompt(article: str, max_words: int) -> str:
-    return PROMPT_TEMPLATE.format(max_words=max_words, article=article.strip())
+def build_prompt(human_payload: dict, dataset: str, max_words: int) -> Optional[str]:
+    if dataset == "paper":
+        article = human_payload.get("article")
+        if not article:
+            return None
+        return PROMPT_TEMPLATE.format(max_words=max_words, article=article.strip())
+
+    source = human_payload.get("source")
+    if not source:
+        return None
+    return TRANSLATION_PROMPT_TEMPLATE.format(source=source.strip())
 
 
 def request_summary(
@@ -60,8 +75,10 @@ def prepare_output_record(
     model_name: str,
     temperature: float,
     max_words: int,
+    dataset: str,
 ) -> dict:
-    return {
+    article_text = human_payload.get("article") or human_payload.get("source")
+    record = {
         "item_type": human_payload.get("item_type", "paper"),
         "title": human_payload.get("title"),
         "origin": "LLM",
@@ -70,9 +87,12 @@ def prepare_output_record(
         "max_words": max_words,
         "generation_prompt_text": prompt,
         "descriptions": [summary],
-        "article": human_payload.get("article"),
+        "article": article_text,
         "source_file_name": human_payload.get("title"),
     }
+    if dataset != "paper":
+        record["source_text"] = human_payload.get("source")
+    return record
 
 
 def ensure_dir(path: Path) -> None:
@@ -82,15 +102,14 @@ def ensure_dir(path: Path) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     repo_root = Path(__file__).resolve().parent
+    parser.add_argument("--dataset", default="paper", help="Dataset key (e.g., paper, trans_seg).")
     parser.add_argument(
         "--human-dir",
-        default=repo_root / "data" / "human",
         type=Path,
         help="Directory containing human-authored JSON files.",
     )
     parser.add_argument(
         "--output-root",
-        default=repo_root / "data" / "llm",
         type=Path,
         help="Base directory (before prefix) for generated files.",
     )
@@ -146,7 +165,30 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print planned work without contacting the endpoint.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    data_root = repo_root / "data"
+
+    def dataset_subdir() -> Optional[str]:
+        if args.dataset == "paper":
+            return None
+        if args.dataset == "trans_seg":
+            return "news_segment"
+        return args.dataset
+
+    subdir = dataset_subdir()
+
+    def resolve_path(sub: str, override: Optional[Path]) -> Path:
+        if override is not None:
+            return override
+        if subdir is None:
+            return data_root / sub
+        return data_root / subdir / sub
+
+    args.human_dir = resolve_path("human", args.human_dir)
+    args.output_root = resolve_path("llm", args.output_root)
+
+    return args
 
 
 def main() -> None:
@@ -178,12 +220,10 @@ def main() -> None:
             with human_path.open() as f:
                 human_payload = json.load(f)
 
-            article = human_payload.get("article")
-            if not article:
-                print(f"[warn] missing 'article' in {human_path}, skipping")
+            prompt = build_prompt(human_payload, args.dataset, args.max_words)
+            if not prompt:
+                print(f"[warn] missing required fields in {human_path}, skipping")
                 continue
-
-            prompt = build_prompt(article, args.max_words)
 
             if args.dry_run:
                 print(f"[dry-run] Would request {human_path.name} -> {output_path}")
@@ -204,6 +244,7 @@ def main() -> None:
                 model,
                 args.temperature,
                 args.max_words,
+                args.dataset,
             )
 
             ensure_dir(output_path.parent)
