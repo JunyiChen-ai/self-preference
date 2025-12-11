@@ -1,13 +1,31 @@
 #!/usr/bin/env python3
-"""Batch description generation via a local vLLM OpenAI-compatible endpoint."""
+"""Batch description generation via local vLLM or remote GPT endpoints."""
 
 import argparse
+import importlib.util
 import json
 import os
 from pathlib import Path
 from typing import Iterable, List, Optional
 
-from openai import BadRequestError, OpenAI
+try:  # Prefer modern OpenAI SDK style
+    from openai import OpenAI  # type: ignore
+except ImportError:  # pragma: no cover - legacy SDK fallback
+    OpenAI = None  # type: ignore
+    import openai as legacy_openai  # type: ignore
+else:
+    legacy_openai = None  # type: ignore
+
+try:  # Backwards-compatible BadRequestError import for older openai packages.
+    from openai import BadRequestError  # type: ignore
+except ImportError:  # pragma: no cover - older SDK fallback
+    try:
+        from openai.error import InvalidRequestError as BadRequestError  # type: ignore
+    except ImportError:  # pragma: no cover
+        class BadRequestError(Exception):
+            """Fallback BadRequestError if SDK does not expose one."""
+
+            pass
 
 PROMPT_TEMPLATE = (
     "Read the following academic paper provided in XML format and create an abstract for it.\n\n"
@@ -34,6 +52,10 @@ def sanitize_folder_name(value: str) -> str:
     return value.replace("/", "_").replace(" ", "_")
 
 
+def is_gpt_model(model_name: str) -> bool:
+    return "gpt" in model_name.lower()
+
+
 def apply_prefix(prefix: Path, path: Path) -> Path:
     rel = Path(str(path).lstrip("/"))
     return prefix / rel
@@ -52,19 +74,66 @@ def build_prompt(human_payload: dict, dataset: str, max_words: int) -> Optional[
     return TRANSLATION_PROMPT_TEMPLATE.format(source=source.strip())
 
 
-def request_summary(
-    client: OpenAI,
+def request_vllm_summary(
+    client,
     model: str,
     prompt: str,
     temperature: float,
     max_tokens: Optional[int],
 ) -> str:
-    response = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
+    messages = [{"role": "user", "content": prompt}]
+    if hasattr(client, "chat") and hasattr(client.chat, "completions"):
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        return response.choices[0].message.content.strip()
+
+    # Legacy openai module interface
+    kwargs = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+    }
+    if max_tokens is not None:
+        kwargs["max_tokens"] = max_tokens
+    response = client.ChatCompletion.create(**kwargs)
+    # Legacy responses are dict-like
+    return response["choices"][0]["message"]["content"].strip()
+
+
+def load_gpt_client(module_path: Path):
+    if not module_path.exists():
+        raise SystemExit(f"GPT client module not found at {module_path}")
+    spec = importlib.util.spec_from_file_location("fairness_gpt_client", module_path)
+    if spec is None or spec.loader is None:
+        raise SystemExit(f"Unable to load GPT client from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    if not hasattr(module, "GPT4oClient"):
+        raise SystemExit("GPT client module missing GPT4oClient class")
+    return module.GPT4oClient()
+
+
+def request_gpt_summary(
+    gpt_client,
+    model: str,
+    prompt: str,
+    temperature: float,
+    max_tokens: Optional[int],
+) -> str:
+    messages = [{"role": "user", "content": prompt}]
+    kwargs = {
+        "model": model,
+        "messages": messages,
+    }
+    if "gpt-5" not in model.lower():
+        kwargs["temperature"] = temperature
+    if max_tokens is not None:
+        kwargs["max_completion_tokens"] = max_tokens
+    response = gpt_client.client.chat.completions.create(**kwargs)
     return response.choices[0].message.content.strip()
 
 
@@ -123,7 +192,7 @@ def parse_args() -> argparse.Namespace:
         "--models",
         nargs="+",
         required=True,
-        help="One or more model names served by the vLLM endpoint.",
+        help="One or more model names.",
     )
     parser.add_argument(
         "--temperature",
@@ -165,13 +234,19 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print planned work without contacting the endpoint.",
     )
+    parser.add_argument(
+        "--gpt-client-path",
+        type=Path,
+        default=Path("/home/v-junyichen/LLaMA-Factory/fairness/GPT.py"),
+        help="Path to the GPT4oClient implementation.",
+    )
     args = parser.parse_args()
 
     data_root = repo_root / "data"
 
     def dataset_subdir() -> Optional[str]:
         if args.dataset == "paper":
-            return None
+            return "paper"
         if args.dataset == "trans_seg":
             return "news_segment"
         return args.dataset
@@ -197,16 +272,31 @@ def main() -> None:
     if not human_files:
         raise SystemExit(f"No JSON files found under {args.human_dir}")
 
-    client = None
-    if not args.dry_run:
-        client = OpenAI(base_url=args.base_url, api_key=args.api_key)
+    needs_vllm = any(not is_gpt_model(m) for m in args.models)
+    needs_gpt = any(is_gpt_model(m) for m in args.models)
+
+    vllm_client = None
+    if not args.dry_run and needs_vllm:
+        if OpenAI is not None:
+            vllm_client = OpenAI(base_url=args.base_url, api_key=args.api_key)
+        else:
+            legacy_openai.api_key = args.api_key  # type: ignore
+            legacy_openai.api_base = args.base_url  # type: ignore
+            vllm_client = legacy_openai  # type: ignore
+
+    gpt_client = None
+    if not args.dry_run and needs_gpt:
+        gpt_client = load_gpt_client(args.gpt_client_path)
 
     max_tokens = args.max_tokens if args.max_tokens > 0 else None
 
     for model in args.models:
         model_folder = sanitize_folder_name(model)
         base_target_dir = args.output_root / model_folder
-        final_target_dir = apply_prefix(args.output_prefix, base_target_dir)
+        if is_gpt_model(model):
+            final_target_dir = base_target_dir
+        else:
+            final_target_dir = apply_prefix(args.output_prefix, base_target_dir)
         ensure_dir(final_target_dir)
         print(f"Processing {len(human_files)} files for model '{model}' -> {final_target_dir}")
 
@@ -230,7 +320,10 @@ def main() -> None:
                 continue
 
             try:
-                summary = request_summary(client, model, prompt, args.temperature, max_tokens)
+                if is_gpt_model(model):
+                    summary = request_gpt_summary(gpt_client, model, prompt, args.temperature, max_tokens)
+                else:
+                    summary = request_vllm_summary(vllm_client, model, prompt, args.temperature, max_tokens)
             except BadRequestError as exc:
                 message = str(exc)
                 if "maximum context length" in message:

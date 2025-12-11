@@ -64,11 +64,15 @@ stop_vllm() {
 }
 
 MODELS=(
-  "Qwen/Qwen3-30B-A3B-Instruct-2507"
-  "Qwen/Qwen3-4B-Instruct-2507"
-  "Qwen/Qwen3-Next-80B-A3B-Instruct"
+  # "Qwen/Qwen3-30B-A3B-Instruct-2507"
+  # "Qwen/Qwen3-4B-Instruct-2507"
+  # "Qwen/Qwen3-Next-80B-A3B-Instruct"
+  "google/gemma-3-4b-it"
+  "google/gemma-3-12b-it"
+  "google/gemma-3-27b-it"
 )
-LAST_EVAL="Qwen/Qwen3-Next-80B-A3B-Instruct"
+# LAST_EVAL="Qwen/Qwen3-Next-80B-A3B-Instruct"
+LAST_EVAL="google/gemma-3-27b-it"
 
 sanitize() {
   local name="$1"
@@ -136,7 +140,7 @@ for pair in "${pairs[@]}"; do
   fi
 
   echo "[run] generator=$GEN_MODEL evaluator=$EVAL_MODEL"
-  start_vllm "$EVAL_MODEL" 8
+  start_vllm "$EVAL_MODEL" 4
   if ! check_ready; then
     echo "[error] evaluator $EVAL_MODEL failed to start"
     stop_vllm

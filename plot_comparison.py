@@ -8,6 +8,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 
+# Set unified theme
+sns.set_theme(style="whitegrid", context="paper", font_scale=1.1)
+
 
 MODEL_ORDER = [
     "Qwen_Qwen3-4B-Instruct-2507",
@@ -16,10 +19,23 @@ MODEL_ORDER = [
 ]
 
 
-def list_models(root: Path) -> List[str]:
+def list_models(root: Path, pattern: str = "") -> List[str]:
+    pattern = pattern.strip().lower()
+    if pattern:
+        matches = sorted(
+            [p.name for p in root.iterdir() if p.is_dir() and pattern in p.name.lower()]
+        )
+        if not matches:
+            raise SystemExit(
+                f"No model directories under {root} match pattern '{pattern}'"
+            )
+        return matches
     if all((root / name).is_dir() for name in MODEL_ORDER):
         return MODEL_ORDER
-    return sorted([p.name for p in root.iterdir() if p.is_dir()])
+    fallback = sorted([p.name for p in root.iterdir() if p.is_dir()])
+    if fallback:
+        return fallback
+    raise SystemExit(f"No model directories found under {root}")
 
 
 def accumulate_matrix(root: Path, model_names: List[str]):
@@ -50,9 +66,14 @@ def accumulate_matrix(root: Path, model_names: List[str]):
     return wins, totals
 
 
-def plot_matrix(wins, totals, model_names, output_path):
+def dataset_label(root: Path) -> str:
+    return "News" if "news" in str(root).lower() else "Paper"
+
+
+def plot_matrix(wins, totals, model_names, output_path, label: str):
     with np.errstate(divide="ignore", invalid="ignore"):
         ratios = np.divide(wins, totals, out=np.zeros_like(wins), where=totals != 0)
+    
     def to_size_label(name: str) -> str:
         for token in ("4B", "30B", "80B"):
             if token in name:
@@ -60,25 +81,21 @@ def plot_matrix(wins, totals, model_names, output_path):
         return name
 
     fig, ax = plt.subplots(figsize=(6, 5))
-    cmap = sns.color_palette("rocket", as_cmap=True)
-    im = ax.imshow(ratios, vmin=0, vmax=1, cmap=cmap)
     short_labels = [to_size_label(name) for name in model_names]
-    ax.set_xticks(range(len(model_names)), labels=short_labels)
-    ax.set_yticks(range(len(model_names)), labels=short_labels)
-    ax.set_title("Qwen3 Self-Preference")
-    ax.set_xlabel("")
-    ax.set_ylabel("")
-    for i in range(len(model_names)):
-        for j in range(len(model_names)):
-            if totals[i, j] == 0:
-                label = "-"
-            else:
-                label = f"{ratios[i, j]:.2f}"
-            ax.text(j, i, label, ha="center", va="center", color="black", fontsize=11)
-    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="ratio")
+    
+    sns.heatmap(ratios, annot=True, fmt=".2f", cmap="YlGnBu",
+                xticklabels=short_labels, yticklabels=short_labels,
+                vmin=0, vmax=1, cbar_kws={'label': 'Win Rate'}, ax=ax,
+                square=True, linewidths=.5, linecolor='white')
+    
+    ax.set_title(f"Qwen3 Self-Preference (Pairwise, {label})")
+    # Keep axis labels optional or minimal as per original
+    ax.set_xlabel("Model B")
+    ax.set_ylabel("Model A")
+    
     fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path)
+    fig.savefig(output_path, dpi=300)
     plt.close(fig)
 
 
@@ -86,14 +103,20 @@ def main():
     parser = argparse.ArgumentParser(description="Confusion matrix across model comparisons")
     parser.add_argument("--input-dir", default="data/comparison")
     parser.add_argument("--output", default="plots/comparison_matrix.png")
+    parser.add_argument(
+        "--model",
+        default="",
+        help="Optional substring to filter model directories inside the input folder",
+    )
     args = parser.parse_args()
 
     root = Path(args.input_dir)
     if not root.exists():
         raise SystemExit(f"Input directory {root} does not exist")
-    model_names = list_models(root)
+    model_names = list_models(root, args.model)
     wins, totals = accumulate_matrix(root, model_names)
-    plot_matrix(wins, totals, model_names, Path(args.output))
+    label = dataset_label(root)
+    plot_matrix(wins, totals, model_names, Path(args.output), label)
     print(f"Saved {args.output}")
 
 

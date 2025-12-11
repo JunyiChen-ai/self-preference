@@ -27,9 +27,12 @@ MAX_TOKENS=256
 TEMP=0
 
 MODELS=(
-  "Qwen/Qwen3-30B-A3B-Instruct-2507"
-  "Qwen/Qwen3-4B-Instruct-2507"
-  "Qwen/Qwen3-Next-80B-A3B-Instruct"
+  # "Qwen/Qwen3-30B-A3B-Instruct-2507"
+  # "Qwen/Qwen3-4B-Instruct-2507"
+  # "Qwen/Qwen3-Next-80B-A3B-Instruct"
+  "google/gemma-3-4b-it"
+  "google/gemma-3-12b-it"
+  "google/gemma-3-27b-it"
 )
 
 check_ready() {
@@ -106,7 +109,7 @@ for comparison_model in "${MODELS[@]}"; do
   fi
 
   echo "[run] comparison_model=$comparison_model"
-  start_vllm "$comparison_model" 8
+  start_vllm "$comparison_model" 4
   if ! check_ready; then
     echo "[error] comparison_model $comparison_model failed to start"
     stop_vllm

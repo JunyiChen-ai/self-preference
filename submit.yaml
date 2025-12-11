@@ -23,7 +23,7 @@ code:
 
 target:
   service: sing
-  name: msrresrchbasicvc
+  name: msrresrchbasicvc 
   workspace_name: CS-NewsAndFeeds-Singularity
 
 storage:
@@ -33,31 +33,30 @@ storage:
     mount_dir: /mnt/blob_output
 
 jobs:
-- name: self-preference
-  sku: 80G8-H100
-  sla_tier: Standard
-  command:
-    - bash run-vllm-societal.sh Qwen/Qwen3-30B-A3B-Instruct-2507 8 --dataset trans_seg
-    - pkill -f 'vllm serve' || true
-    - bash run-vllm-societal.sh Qwen/Qwen3-4B-Instruct-2507 8 --dataset trans_seg
-    - pkill -f 'vllm serve' || true
-    - bash run-vllm-societal.sh Qwen/Qwen3-Next-80B-A3B-Instruct 8 --dataset trans_seg
-    - pkill -f 'vllm serve' || true
-    - bash run-comparisons.sh
-    - pkill -f 'vllm serve' || true
-    - bash recognition.sh
-    - pkill -f 'vllm serve' || true
-    - bash recognition_triple.sh
-    - pkill -f 'vllm serve' || true
-    - bash comparison_triple.sh
-    - pkill -f 'vllm serve' || true
-  submit_args:
-    env:
-      DATASET: trans_seg
-      BLOB_OUTPUT_PATH: /mnt/blob_output/v-junyichen/
-      AMLT_DOCKERFILE_TEMPLATE: DEFAULT
-      _AZUREML_SINGULARITY_JOB_UAI: /subscriptions/b6dc87f3-c479-49c8-8cb5-7896da3ff895/resourceGroups/AMLStudio/providers/Microsoft.ManagedIdentity/userAssignedIdentities/rankfun_aml
-      CUDA_LAUNCH_BLOCKING: 1
-      MKL_SERVICE_FORCE_INTEL: 1
-      HF_TOKEN: ${HF_TOKEN}
-      # WANDB_API_KEY: $WANDB_API_KEY
+  - name: self-preference
+    sku: 80G8-A100
+    sla_tier: Standard
+    command:
+      - bash run-vllm-societal.sh google/gemma-3-4b-it 4 --dataset trans_seg
+      - pkill -f 'vllm serve' || true
+      - bash run-vllm-societal.sh google/gemma-3-12b-it 4 --dataset trans_seg
+      - pkill -f 'vllm serve' || true
+      - bash run-vllm-societal.sh google/gemma-3-27b-it 4 --dataset trans_seg
+      - pkill -f 'vllm serve' || true
+      - bash run-comparisons.sh
+      - pkill -f 'vllm serve' || true
+      - bash recognition.sh
+      - pkill -f 'vllm serve' || true
+      - bash recognition_triple.sh
+      - pkill -f 'vllm serve' || true
+      - bash comparison_triple.sh
+      - pkill -f 'vllm serve' || true
+    submit_args:
+      env:
+        DATASET: trans_seg
+        BLOB_OUTPUT_PATH: /mnt/blob_output/v-junyichen/
+        AMLT_DOCKERFILE_TEMPLATE: DEFAULT
+        CUDA_LAUNCH_BLOCKING: 1
+        MKL_SERVICE_FORCE_INTEL: 1
+        HF_TOKEN: ${HF_TOKEN}
+        # WANDB_API_KEY: $WANDB_API_KEY

@@ -14,26 +14,38 @@ fi
 
 if [[ -z "$DATASET_SUBDIR" ]]; then
   GEN_ROOT="$SCRIPT_DIR/data/llm"
-  OUT_ROOT="$SCRIPT_DIR/data/recognition_individual"
+  OUT_ROOT_BASE="$SCRIPT_DIR/data/comparison_multi"
   HUMAN_DIR="$SCRIPT_DIR/data/human"
 else
   GEN_ROOT="$SCRIPT_DIR/data/$DATASET_SUBDIR/llm"
-  OUT_ROOT="$SCRIPT_DIR/data/$DATASET_SUBDIR/recognition_individual"
+  OUT_ROOT_BASE="$SCRIPT_DIR/data/$DATASET_SUBDIR/comparison_multi"
   HUMAN_DIR="$SCRIPT_DIR/data/$DATASET_SUBDIR/human"
 fi
 BASE_URL="http://127.0.0.1:8000/v1"
 API_KEY="${OPENAI_API_KEY:-EMPTY}"
-MAX_TOKENS=32
+MAX_TOKENS=256
 TEMP=0
 
-MODELS=(
-  # "Qwen/Qwen3-30B-A3B-Instruct-2507"
-  # "Qwen/Qwen3-4B-Instruct-2507"
-  # "Qwen/Qwen3-Next-80B-A3B-Instruct"
+GENERATOR_MODELS=(
+  "Qwen/Qwen3-30B-A3B-Instruct-2507"
+  "Qwen/Qwen3-4B-Instruct-2507"
+  "Qwen/Qwen3-Next-80B-A3B-Instruct"
   "google/gemma-3-4b-it"
   "google/gemma-3-12b-it"
   "google/gemma-3-27b-it"
 )
+COMPARISON_MODELS=(
+  "Qwen/Qwen3-30B-A3B-Instruct-2507"
+  "Qwen/Qwen3-4B-Instruct-2507"
+  "Qwen/Qwen3-Next-80B-A3B-Instruct"
+  "google/gemma-3-4b-it"
+  "google/gemma-3-12b-it"
+  "google/gemma-3-27b-it"
+)
+LAST_COMPARISON="google/gemma-3-27b-it"
+GENERATOR_COUNT=${#GENERATOR_MODELS[@]}
+VARIANT_SUFFIX="comparison_${GENERATOR_COUNT}"
+OUT_ROOT="$OUT_ROOT_BASE/$VARIANT_SUFFIX"
 
 check_ready() {
   local max_wait=600
@@ -85,52 +97,61 @@ stop_vllm() {
   fi
 }
 
-have_all_recognitions() {
+have_all_comparisons_multi() {
   local target_dir="$1"
   [[ -d "$target_dir" ]] || return 1
-  local sources=(human "${MODELS[@]}")
   while IFS= read -r -d '' human_file; do
     local base
     base=$(basename "$human_file")
-    for source in "${sources[@]}"; do
-      local folder
-      if [[ "$source" == human ]]; then
-        folder="$target_dir/human"
-      else
-        folder="$target_dir/$(sanitize "$source")"
-      fi
-      if [[ ! -f "$folder/$base" ]]; then
-        return 1
-      fi
-    done
+    if [[ ! -f "$target_dir/$base" ]]; then
+      return 1
+    fi
   done < <(find "$HUMAN_DIR" -maxdepth 1 -type f -name '*.json' -print0)
   return 0
 }
 
-for recognizer in "${MODELS[@]}"; do
-  RECOGNIZER_FOLDER=$(sanitize "$recognizer")
-  OUT_LOCAL="$OUT_ROOT/$RECOGNIZER_FOLDER"
+priority_models=()
+late_models=()
+for eval in "${COMPARISON_MODELS[@]}"; do
+  if [[ "$eval" == "$LAST_COMPARISON" ]]; then
+    late_models+=("$eval")
+  else
+    priority_models+=("$eval")
+  fi
+done
+if [[ ${#priority_models[@]} -gt 0 && ${#late_models[@]} -gt 0 ]]; then
+  ordered_models=("${priority_models[@]}" "${late_models[@]}")
+elif [[ ${#priority_models[@]} -gt 0 ]]; then
+  ordered_models=("${priority_models[@]}")
+else
+  ordered_models=("${late_models[@]}")
+fi
+
+for comparison_model in "${ordered_models[@]}"; do
+  folder=$(sanitize "$comparison_model")
+  OUT_LOCAL="$OUT_ROOT/$folder"
   OUT_STORED=$(real_prefixed_path "$OUT_LOCAL")
 
-  if have_all_recognitions "$OUT_STORED"; then
-    echo "[skip] recognition already exists for recognizer $recognizer"
+  if have_all_comparisons_multi "$OUT_STORED"; then
+    echo "[skip] comparison already exists for $comparison_model"
     continue
   fi
 
-  echo "[run] recognizer=$recognizer"
-  start_vllm "$recognizer" 8
+  echo "[run] comparison_model=$comparison_model"
+  start_vllm "$comparison_model" 4
   if ! check_ready; then
-    echo "[error] recognizer $recognizer failed to start"
+    echo "[error] comparison_model $comparison_model failed to start"
     stop_vllm
     continue
   fi
 
-  python "$SCRIPT_DIR/recognition_individual.py" \
-    --recognizer-model "$recognizer" \
-    --generator-models "${MODELS[@]}" \
+  python "$SCRIPT_DIR/comparison_multi.py" \
+    --comparison-models "$comparison_model" \
+    --generator-models "${GENERATOR_MODELS[@]}" \
     --human-dir "$HUMAN_DIR" \
     --generator-root "$GEN_ROOT" \
-    --output-root "$OUT_ROOT" \
+    --output-root "$OUT_ROOT_BASE" \
+    --variant-suffix "$VARIANT_SUFFIX" \
     --prefix "$PREFIX" \
     --base-url "$BASE_URL" \
     --api-key "$API_KEY" \
