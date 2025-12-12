@@ -159,7 +159,7 @@ def parse_args() -> argparse.Namespace:
 
     def dataset_subdir() -> Optional[str]:
         if args.dataset == "paper":
-            return None
+            return "paper"
         if args.dataset == "trans_seg":
             return "news_segment"
         return args.dataset

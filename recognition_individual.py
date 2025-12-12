@@ -9,7 +9,15 @@ import os
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
+import importlib.util
+import time
+
 from openai import OpenAI
+
+try:
+    from openai import RateLimitError  # type: ignore
+except ImportError:  # pragma: no cover
+    RateLimitError = Exception  # type: ignore
 
 PAPER_PROMPT_BODY = (
     "I have some research paper abstracts written by you and some written by others, "
@@ -34,6 +42,10 @@ def list_json_files(root: Path) -> Iterable[Path]:
 
 def sanitize_name(value: str) -> str:
     return value.replace("/", "_").replace(" ", "_")
+
+
+def is_gpt_model(name: str) -> bool:
+    return "gpt" in name.lower()
 
 
 def apply_prefix(prefix: Path, path: Path) -> Path:
@@ -108,6 +120,46 @@ def request_label(
     return response.choices[0].message.content.strip()
 
 
+def load_gpt_client(module_path: Path):
+    spec = importlib.util.spec_from_file_location("recognition_individual_gpt", module_path)
+    if spec is None or spec.loader is None:
+        raise SystemExit(f"Unable to import GPT client from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    if not hasattr(module, "GPT4oClient"):
+        raise SystemExit("GPT client module missing GPT4oClient class")
+    return module.GPT4oClient()
+
+
+def request_gpt_label(
+    client,
+    model: str,
+    prompt: str,
+    temperature: float,
+    max_tokens: Optional[int],
+    retries: int = 3,
+) -> str:
+    messages = [{"role": "user", "content": prompt}]
+    kwargs = {"model": model, "messages": messages}
+    if "gpt-5" not in model.lower():
+        kwargs["temperature"] = temperature
+    if max_tokens is not None:
+        kwargs["max_completion_tokens"] = max_tokens
+    attempt = 0
+    while True:
+        try:
+            response = client.client.chat.completions.create(**kwargs)
+            return response.choices[0].message.content.strip()
+        except RateLimitError as exc:  # type: ignore
+            attempt += 1
+            if attempt <= retries:
+                time.sleep(30)
+                continue
+            raise
+        except Exception:
+            raise
+
+
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
@@ -132,13 +184,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--max-tokens", type=int, default=32)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--gpt-client-path",
+        type=Path,
+        default=Path("/home/v-junyichen/LLaMA-Factory/fairness/GPT.py"),
+    )
     args = parser.parse_args()
 
     data_root = repo_root / "data"
 
     def dataset_subdir() -> Optional[str]:
         if args.dataset == "paper":
-            return None
+            return "paper"
         if args.dataset == "trans_seg":
             return "news_segment"
         return args.dataset
@@ -165,12 +222,17 @@ def main() -> None:
     if not human_files:
         raise SystemExit(f"No JSON files under {args.human_dir}")
 
-    prefixed_output_root = apply_prefix(args.prefix, args.output_root / sanitize_name(args.recognizer_model))
+    recognizer_is_gpt = is_gpt_model(args.recognizer_model)
+    base_output = args.output_root / sanitize_name(args.recognizer_model)
+    prefixed_output_root = base_output if recognizer_is_gpt else apply_prefix(args.prefix, base_output)
     ensure_dir(prefixed_output_root)
 
     client: Optional[OpenAI] = None
-    if not args.dry_run:
+    gpt_client = None
+    if not args.dry_run and not recognizer_is_gpt:
         client = OpenAI(base_url=args.base_url, api_key=args.api_key)
+    if not args.dry_run and recognizer_is_gpt:
+        gpt_client = load_gpt_client(args.gpt_client_path)
     max_tokens = args.max_tokens if args.max_tokens > 0 else None
 
     sources: List[Dict] = [
@@ -183,7 +245,10 @@ def main() -> None:
     ]
     for model in args.generator_models:
         folder = args.generator_root / sanitize_name(model)
-        prefixed = apply_prefix(args.prefix, folder)
+        if recognizer_is_gpt or is_gpt_model(model):
+            prefixed = folder
+        else:
+            prefixed = apply_prefix(args.prefix, folder)
         sources.append(
             {
                 "name": model,
@@ -229,12 +294,37 @@ def main() -> None:
                 print(f"[dry-run] Would query {source['name']}::{human_path.name} -> {output_path}")
                 continue
 
-            assert client is not None
-            response_text = request_label(client, args.recognizer_model, prompt, args.temperature, max_tokens)
+            if recognizer_is_gpt:
+                assert gpt_client is not None
+                response_text = request_gpt_label(
+                    gpt_client,
+                    args.recognizer_model,
+                    prompt,
+                    args.temperature,
+                    max_tokens,
+                )
+            else:
+                assert client is not None
+                response_text = request_label(client, args.recognizer_model, prompt, args.temperature, max_tokens)
             if is_refusal(response_text):
                 prompt_variant = "fallback"
                 fallback_prompt = build_prompt(description, args.dataset, reinforce=True)
-                response_text = request_label(client, args.recognizer_model, fallback_prompt, args.temperature, max_tokens)
+                if recognizer_is_gpt:
+                    response_text = request_gpt_label(
+                        gpt_client,
+                        args.recognizer_model,
+                        fallback_prompt,
+                        args.temperature,
+                        max_tokens,
+                    )
+                else:
+                    response_text = request_label(
+                        client,
+                        args.recognizer_model,
+                        fallback_prompt,
+                        args.temperature,
+                        max_tokens,
+                    )
 
             normalized = normalize_response(response_text)
             result = {

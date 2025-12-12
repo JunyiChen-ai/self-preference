@@ -5,7 +5,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 PREFIX="/mnt/blob_output/v-junyichen"
 DATASET=${DATASET:-paper}
 if [[ "$DATASET" == "paper" ]]; then
-  DATASET_SUBDIR=""
+  DATASET_SUBDIR="paper"
 elif [[ "$DATASET" == "trans_seg" ]]; then
   DATASET_SUBDIR="news_segment"
 else
@@ -26,13 +26,24 @@ API_KEY="${OPENAI_API_KEY:-EMPTY}"
 MAX_TOKENS=32
 TEMP=0
 
-MODELS=(
-  # "Qwen/Qwen3-30B-A3B-Instruct-2507"
-  # "Qwen/Qwen3-4B-Instruct-2507"
-  # "Qwen/Qwen3-Next-80B-A3B-Instruct"
+RECOGNIZER_MODELS=(
+  "Qwen/Qwen3-30B-A3B-Instruct-2507"
+  "Qwen/Qwen3-4B-Instruct-2507"
+  "Qwen/Qwen3-Next-80B-A3B-Instruct"
   "google/gemma-3-4b-it"
   "google/gemma-3-12b-it"
   "google/gemma-3-27b-it"
+)
+GENERATOR_MODELS=(
+  "Qwen/Qwen3-30B-A3B-Instruct-2507"
+  "Qwen/Qwen3-4B-Instruct-2507"
+  "Qwen/Qwen3-Next-80B-A3B-Instruct"
+  "google/gemma-3-4b-it"
+  "google/gemma-3-12b-it"
+  "google/gemma-3-27b-it"
+  "gpt-4.1-nano_2025-04-14"
+  "gpt-4o_2024-08-06"
+  "gpt-5-chat_2025-08-07"
 )
 
 check_ready() {
@@ -88,7 +99,7 @@ stop_vllm() {
 have_all_recognitions() {
   local target_dir="$1"
   [[ -d "$target_dir" ]] || return 1
-  local sources=(human "${MODELS[@]}")
+  local sources=(human "${GENERATOR_MODELS[@]}")
   while IFS= read -r -d '' human_file; do
     local base
     base=$(basename "$human_file")
@@ -107,7 +118,7 @@ have_all_recognitions() {
   return 0
 }
 
-for recognizer in "${MODELS[@]}"; do
+for recognizer in "${RECOGNIZER_MODELS[@]}"; do
   RECOGNIZER_FOLDER=$(sanitize "$recognizer")
   OUT_LOCAL="$OUT_ROOT/$RECOGNIZER_FOLDER"
   OUT_STORED=$(real_prefixed_path "$OUT_LOCAL")
@@ -118,7 +129,7 @@ for recognizer in "${MODELS[@]}"; do
   fi
 
   echo "[run] recognizer=$recognizer"
-  start_vllm "$recognizer" 8
+  start_vllm "$recognizer" 4
   if ! check_ready; then
     echo "[error] recognizer $recognizer failed to start"
     stop_vllm
@@ -127,7 +138,7 @@ for recognizer in "${MODELS[@]}"; do
 
   python "$SCRIPT_DIR/recognition_individual.py" \
     --recognizer-model "$recognizer" \
-    --generator-models "${MODELS[@]}" \
+    --generator-models "${GENERATOR_MODELS[@]}" \
     --human-dir "$HUMAN_DIR" \
     --generator-root "$GEN_ROOT" \
     --output-root "$OUT_ROOT" \

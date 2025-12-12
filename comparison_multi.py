@@ -9,6 +9,7 @@ import os
 import random
 import re
 from pathlib import Path
+import importlib.util
 from typing import Dict, Iterable, List, Optional
 
 from openai import OpenAI
@@ -46,6 +47,10 @@ def list_json_files(root: Path) -> Iterable[Path]:
 
 def sanitize_name(value: str) -> str:
     return value.replace("/", "_").replace(" ", "_")
+
+
+def is_gpt_model(name: str) -> bool:
+    return "gpt" in name.lower()
 
 
 def apply_prefix(prefix: Path, path: Path) -> Path:
@@ -114,6 +119,38 @@ def request_choice(
     return response.choices[0].message.content.strip()
 
 
+def load_gpt_client(module_path: Path):
+    spec = importlib.util.spec_from_file_location("comparison_gpt", module_path)
+    if spec is None or spec.loader is None:
+        raise SystemExit(f"Unable to import GPT client from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    if not hasattr(module, "GPT4oClient"):
+        raise SystemExit("GPT client module missing GPT4oClient class")
+    return module.GPT4oClient()
+
+
+def request_gpt_choice(
+    client,
+    model: str,
+    system_prompt: str,
+    prompt: str,
+    temperature: float,
+    max_tokens: Optional[int],
+) -> str:
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": prompt},
+    ]
+    kwargs = {"model": model, "messages": messages}
+    if "gpt-5" not in model.lower():
+        kwargs["temperature"] = temperature
+    if max_tokens is not None:
+        kwargs["max_completion_tokens"] = max_tokens
+    response = client.client.chat.completions.create(**kwargs)
+    return response.choices[0].message.content.strip()
+
+
 def normalize_choice(text: str, option_count: int) -> Optional[int]:
     for match in re.finditer(r"(\d+)", text):
         idx = int(match.group(1))
@@ -158,13 +195,19 @@ def parse_args() -> argparse.Namespace:
         "--variant-suffix",
         help="Optional name for a subdirectory that segregates outputs (default uses generator count).",
     )
+    parser.add_argument(
+        "--gpt-client-path",
+        type=Path,
+        default=Path("/home/v-junyichen/LLaMA-Factory/fairness/GPT.py"),
+        help="Path to GPT4oClient implementation for GPT evaluators.",
+    )
     args = parser.parse_args()
 
     data_root = repo_root / "data"
 
     def dataset_subdir() -> Optional[str]:
         if args.dataset == "paper":
-            return None
+            return "paper"
         if args.dataset == "trans_seg":
             return "news_segment"
         return args.dataset
@@ -196,10 +239,15 @@ def load_human_files(args: argparse.Namespace) -> List[Path]:
 
 
 def gather_generators(args: argparse.Namespace) -> Dict[str, Path]:
-    return {
-        model: apply_prefix(args.prefix, args.generator_root / sanitize_name(model))
-        for model in args.generator_models
-    }
+    evaluator_has_gpt = any(is_gpt_model(m) for m in args.comparison_models)
+    paths: Dict[str, Path] = {}
+    for model in args.generator_models:
+        base_path = args.generator_root / sanitize_name(model)
+        if is_gpt_model(model) or evaluator_has_gpt:
+            paths[model] = base_path
+        else:
+            paths[model] = apply_prefix(args.prefix, base_path)
+    return paths
 
 
 def process_comparison(
@@ -208,10 +256,12 @@ def process_comparison(
     generator_paths: Dict[str, Path],
     args: argparse.Namespace,
     client: Optional[OpenAI],
+    gpt_client,
     rng: random.Random,
     max_tokens: Optional[int],
 ) -> None:
-    output_dir = apply_prefix(args.prefix, args.output_root / sanitize_name(comparison_model))
+    base_output = args.output_root / sanitize_name(comparison_model)
+    output_dir = base_output if is_gpt_model(comparison_model) else apply_prefix(args.prefix, base_output)
     ensure_dir(output_dir)
 
     for human_path in human_files:
@@ -231,7 +281,10 @@ def process_comparison(
 
         missing = False
         for model, folder in generator_paths.items():
-            gen_path = folder / human_path.name
+            candidate_dir = folder
+            if is_gpt_model(comparison_model) and not is_gpt_model(model):
+                candidate_dir = args.generator_root / sanitize_name(model)
+            gen_path = candidate_dir / human_path.name
             if not gen_path.exists():
                 print(f"[skip-missing] {comparison_model} missing {gen_path}")
                 missing = True
@@ -256,29 +309,50 @@ def process_comparison(
         system_prompt, prompt = build_prompt(args.dataset, article, shuffled)
         prompt_variant = "base"
 
-        assert client is not None
-        response = request_choice(
-            client,
-            comparison_model,
-            system_prompt,
-            prompt,
-            args.temperature,
-            max_tokens,
-        )
+        if is_gpt_model(comparison_model):
+            assert gpt_client is not None
+            response = request_gpt_choice(
+                gpt_client,
+                comparison_model,
+                system_prompt,
+                prompt,
+                args.temperature,
+                max_tokens,
+            )
+        else:
+            assert client is not None
+            response = request_choice(
+                client,
+                comparison_model,
+                system_prompt,
+                prompt,
+                args.temperature,
+                max_tokens,
+            )
         choice = normalize_choice(response, len(shuffled))
         if choice is None:
             prompt_variant = "fallback"
             fallback_system_prompt, fallback_prompt = build_prompt(
                 args.dataset, article, shuffled, reinforce=True
             )
-            response = request_choice(
-                client,
-                comparison_model,
-                fallback_system_prompt,
-                fallback_prompt,
-                args.temperature,
-                max_tokens,
-            )
+            if is_gpt_model(comparison_model):
+                response = request_gpt_choice(
+                    gpt_client,
+                    comparison_model,
+                    fallback_system_prompt,
+                    fallback_prompt,
+                    args.temperature,
+                    max_tokens,
+                )
+            else:
+                response = request_choice(
+                    client,
+                    comparison_model,
+                    fallback_system_prompt,
+                    fallback_prompt,
+                    args.temperature,
+                    max_tokens,
+                )
             choice = normalize_choice(response, len(shuffled))
 
         options_meta = [{"index": idx, "source": opt["source"]} for idx, opt in enumerate(shuffled, start=1)]
@@ -309,9 +383,15 @@ def main() -> None:
 
     rng = random.Random(args.shuffle_seed) if args.shuffle_seed is not None else random.Random()
 
+    evaluator_has_gpt = any(is_gpt_model(m) for m in args.comparison_models)
+    evaluator_has_vllm = any(not is_gpt_model(m) for m in args.comparison_models)
+
     client: Optional[OpenAI] = None
-    if not args.dry_run:
+    gpt_client = None
+    if not args.dry_run and evaluator_has_vllm:
         client = OpenAI(base_url=args.base_url, api_key=args.api_key)
+    if not args.dry_run and evaluator_has_gpt:
+        gpt_client = load_gpt_client(args.gpt_client_path)
     max_tokens = args.max_tokens if args.max_tokens > 0 else None
 
     for comparison_model in args.comparison_models:
@@ -321,6 +401,7 @@ def main() -> None:
             generator_paths,
             args,
             client,
+            gpt_client,
             rng,
             max_tokens,
         )

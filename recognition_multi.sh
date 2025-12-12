@@ -5,7 +5,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 PREFIX="/mnt/blob_output/v-junyichen"
 DATASET=${DATASET:-paper}
 if [[ "$DATASET" == "paper" ]]; then
-  DATASET_SUBDIR=""
+  DATASET_SUBDIR="paper"
 elif [[ "$DATASET" == "trans_seg" ]]; then
   DATASET_SUBDIR="news_segment"
 else
@@ -33,8 +33,18 @@ GENERATOR_MODELS=(
   "google/gemma-3-4b-it"
   "google/gemma-3-12b-it"
   "google/gemma-3-27b-it"
+  "gpt-4.1-nano_2025-04-14"
+  "gpt-4o_2024-08-06"
+  "gpt-5-chat_2025-08-07"
 )
-RECOGNIZER_MODELS=("${GENERATOR_MODELS[@]}")
+RECOGNIZER_MODELS=(
+  "Qwen/Qwen3-30B-A3B-Instruct-2507"
+  "Qwen/Qwen3-4B-Instruct-2507"
+  "Qwen/Qwen3-Next-80B-A3B-Instruct"
+  "google/gemma-3-4b-it"
+  "google/gemma-3-12b-it"
+  "google/gemma-3-27b-it"
+)
 GENERATOR_COUNT=${#GENERATOR_MODELS[@]}
 VARIANT_SUFFIX="recognition_${GENERATOR_COUNT}"
 OUT_ROOT="$OUT_ROOT_BASE/$VARIANT_SUFFIX"

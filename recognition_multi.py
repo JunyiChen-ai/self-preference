@@ -11,6 +11,8 @@ import re
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
+import importlib.util
+
 from openai import OpenAI
 
 PAPER_PROMPT_TEMPLATE = (
@@ -41,6 +43,10 @@ def list_json_files(root: Path) -> Iterable[Path]:
 
 def sanitize_name(value: str) -> str:
     return value.replace("/", "_").replace(" ", "_")
+
+
+def is_gpt_model(name: str) -> bool:
+    return "gpt" in name.lower()
 
 
 def apply_prefix(prefix: Path, path: Path) -> Path:
@@ -107,6 +113,34 @@ def request_recognition(
     return response.choices[0].message.content.strip()
 
 
+def load_gpt_client(module_path: Path):
+    spec = importlib.util.spec_from_file_location("recognition_gpt", module_path)
+    if spec is None or spec.loader is None:
+        raise SystemExit(f"Unable to import GPT client from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    if not hasattr(module, "GPT4oClient"):
+        raise SystemExit("GPT client module missing GPT4oClient class")
+    return module.GPT4oClient()
+
+
+def request_gpt(
+    client,
+    model: str,
+    prompt: str,
+    temperature: float,
+    max_tokens: Optional[int],
+) -> str:
+    messages = [{"role": "user", "content": prompt}]
+    kwargs = {"model": model, "messages": messages}
+    if "gpt-5" not in model.lower():
+        kwargs["temperature"] = temperature
+    if max_tokens is not None:
+        kwargs["max_completion_tokens"] = max_tokens
+    response = client.client.chat.completions.create(**kwargs)
+    return response.choices[0].message.content.strip()
+
+
 def is_refusal(text: str) -> bool:
     lowered = text.strip().lower()
     if not lowered:
@@ -154,6 +188,12 @@ def parse_args() -> argparse.Namespace:
     parser.set_defaults(skip_existing=True)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
+        "--gpt-client-path",
+        type=Path,
+        default=Path("/home/v-junyichen/LLaMA-Factory/fairness/GPT.py"),
+        help="Path to GPT4oClient implementation for Azure GPT evaluators.",
+    )
+    parser.add_argument(
         "--variant-suffix",
         help="Optional name for a subdirectory that segregates outputs (default uses generator count).",
     )
@@ -163,7 +203,7 @@ def parse_args() -> argparse.Namespace:
 
     def dataset_subdir() -> Optional[str]:
         if args.dataset == "paper":
-            return None
+            return "paper"
         if args.dataset == "trans_seg":
             return "news_segment"
         return args.dataset
@@ -203,10 +243,12 @@ def process_recognizer(
     generator_dirs: Dict[str, Path],
     args: argparse.Namespace,
     client: Optional[OpenAI],
+    gpt_client,
     rng: random.Random,
     max_tokens: Optional[int],
 ) -> None:
-    output_dir = apply_prefix(args.prefix, args.output_root / sanitize_name(recognizer))
+    base_output = args.output_root / sanitize_name(recognizer)
+    output_dir = base_output if is_gpt_model(recognizer) else apply_prefix(args.prefix, base_output)
     ensure_dir(output_dir)
 
     for filename in sample_files:
@@ -217,9 +259,26 @@ def process_recognizer(
 
         option_payloads: List[Dict] = []
         source_text: Optional[str] = None
+
+        human_path = args.human_dir / filename
+        if not human_path.exists():
+            print(f"[skip-missing] {recognizer} missing human file {human_path}")
+            continue
+        human_payload = load_json(human_path)
+        human_desc = extract_description(human_payload)
+        if not human_desc:
+            print(f"[skip-empty] {human_path} has no description")
+            continue
+        option_payloads.append({"source": "human", "description": human_desc})
+        if args.dataset != "paper":
+            source_text = extract_source_text(human_payload)
+
         missing = False
         for model, folder in generator_dirs.items():
-            candidate_path = folder / filename
+            candidate_dir = folder
+            if is_gpt_model(recognizer) and not is_gpt_model(model):
+                candidate_dir = args.generator_root / sanitize_name(model)
+            candidate_path = candidate_dir / filename
             if not candidate_path.exists():
                 print(f"[skip-missing] {recognizer} missing {candidate_path}")
                 missing = True
@@ -250,13 +309,20 @@ def process_recognizer(
         prompt = build_prompt(args.dataset, shuffled, source_text)
         prompt_variant = "base"
 
-        assert client is not None
-        response = request_recognition(client, recognizer, prompt, args.temperature, max_tokens)
+        if is_gpt_model(recognizer):
+            assert gpt_client is not None
+            response = request_gpt(gpt_client, recognizer, prompt, args.temperature, max_tokens)
+        else:
+            assert client is not None
+            response = request_recognition(client, recognizer, prompt, args.temperature, max_tokens)
         choice = parse_choice(response, len(shuffled))
         if is_refusal(response) or choice is None:
             prompt_variant = "fallback"
             fallback_prompt = build_prompt(args.dataset, shuffled, source_text, reinforce=True)
-            response = request_recognition(client, recognizer, fallback_prompt, args.temperature, max_tokens)
+            if is_gpt_model(recognizer):
+                response = request_gpt(gpt_client, recognizer, fallback_prompt, args.temperature, max_tokens)
+            else:
+                response = request_recognition(client, recognizer, fallback_prompt, args.temperature, max_tokens)
             choice = parse_choice(response, len(shuffled))
 
         options_meta = [{"index": idx, "source": opt["source"]} for idx, opt in enumerate(shuffled, start=1)]
@@ -282,21 +348,39 @@ def process_recognizer(
 
 def main() -> None:
     args = parse_args()
-    generator_dirs = {
-        model: apply_prefix(args.prefix, args.generator_root / sanitize_name(model))
-        for model in args.generator_models
-    }
+    recognizer_has_gpt = any(is_gpt_model(m) for m in args.recognizer_models)
+    generator_dirs: Dict[str, Path] = {}
+    for model in args.generator_models:
+        base_path = args.generator_root / sanitize_name(model)
+        if is_gpt_model(model) or recognizer_has_gpt:
+            generator_dirs[model] = base_path
+        else:
+            generator_dirs[model] = apply_prefix(args.prefix, base_path)
     sample_files = load_generator_filenames(generator_dirs)
 
     rng = random.Random(args.shuffle_seed) if args.shuffle_seed is not None else random.Random()
 
+    recognizer_has_vllm = any(not is_gpt_model(m) for m in args.recognizer_models)
+
     client: Optional[OpenAI] = None
-    if not args.dry_run:
+    gpt_client = None
+    if not args.dry_run and recognizer_has_vllm:
         client = OpenAI(base_url=args.base_url, api_key=args.api_key)
+    if not args.dry_run and recognizer_has_gpt:
+        gpt_client = load_gpt_client(args.gpt_client_path)
     max_tokens = args.max_tokens if args.max_tokens > 0 else None
 
     for recognizer in args.recognizer_models:
-        process_recognizer(recognizer, sample_files, generator_dirs, args, client, rng, max_tokens)
+        process_recognizer(
+            recognizer,
+            sample_files,
+            generator_dirs,
+            args,
+            client,
+            gpt_client,
+            rng,
+            max_tokens,
+        )
 
 
 if __name__ == "__main__":

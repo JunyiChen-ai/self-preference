@@ -14,22 +14,33 @@ fi
 
 if [[ -z "$DATASET_SUBDIR" ]]; then
   GEN_ROOT="$SCRIPT_DIR/data/llm"
-  OUT_ROOT="$SCRIPT_DIR/data/comparison_triple"
+  OUT_ROOT_BASE="$SCRIPT_DIR/data/prefer_individual"
   HUMAN_DIR="$SCRIPT_DIR/data/human"
 else
   GEN_ROOT="$SCRIPT_DIR/data/$DATASET_SUBDIR/llm"
-  OUT_ROOT="$SCRIPT_DIR/data/$DATASET_SUBDIR/comparison_triple"
+  OUT_ROOT_BASE="$SCRIPT_DIR/data/$DATASET_SUBDIR/prefer_individual"
   HUMAN_DIR="$SCRIPT_DIR/data/$DATASET_SUBDIR/human"
 fi
 BASE_URL="http://127.0.0.1:8000/v1"
 API_KEY="${OPENAI_API_KEY:-EMPTY}"
-MAX_TOKENS=256
+MAX_TOKENS=128
 TEMP=0
 
-MODELS=(
-  # "Qwen/Qwen3-30B-A3B-Instruct-2507"
-  # "Qwen/Qwen3-4B-Instruct-2507"
-  # "Qwen/Qwen3-Next-80B-A3B-Instruct"
+GENERATOR_MODELS=(
+  "Qwen/Qwen3-30B-A3B-Instruct-2507"
+  "Qwen/Qwen3-4B-Instruct-2507"
+  "Qwen/Qwen3-Next-80B-A3B-Instruct"
+  "google/gemma-3-4b-it"
+  "google/gemma-3-12b-it"
+  "google/gemma-3-27b-it"
+  "gpt-4.1-nano_2025-04-14"
+  "gpt-4o_2024-08-06"
+  "gpt-5-chat_2025-08-07"
+)
+EVALUATOR_MODELS=(
+  "Qwen/Qwen3-30B-A3B-Instruct-2507"
+  "Qwen/Qwen3-4B-Instruct-2507"
+  "Qwen/Qwen3-Next-80B-A3B-Instruct"
   "google/gemma-3-4b-it"
   "google/gemma-3-12b-it"
   "google/gemma-3-27b-it"
@@ -56,12 +67,6 @@ sanitize() {
   printf '%s' "$name"
 }
 
-real_prefixed_path() {
-  local rel="$1"
-  rel=${rel#/}
-  printf '%s/%s' "$PREFIX" "$rel"
-}
-
 start_vllm() {
   local model="$1"
   local gpus="$2"
@@ -85,43 +90,21 @@ stop_vllm() {
   fi
 }
 
-have_all_triple() {
-  local target_dir="$1"
-  [[ -d "$target_dir" ]] || return 1
-  while IFS= read -r -d '' human_file; do
-    local base
-    base=$(basename "$human_file")
-    if [[ ! -f "$target_dir/$base" ]]; then
-      return 1
-    fi
-  done < <(find "$HUMAN_DIR" -maxdepth 1 -type f -name '*.json' -print0)
-  return 0
-}
-
-for comparison_model in "${MODELS[@]}"; do
-  local_folder=$(sanitize "$comparison_model")
-  OUT_LOCAL="$OUT_ROOT/$local_folder"
-  OUT_STORED=$(real_prefixed_path "$OUT_LOCAL")
-
-  if have_all_triple "$OUT_STORED"; then
-    echo "[skip] triple comparison already exists for $comparison_model"
-    continue
-  fi
-
-  echo "[run] comparison_model=$comparison_model"
-  start_vllm "$comparison_model" 4
+for evaluator in "${EVALUATOR_MODELS[@]}"; do
+  echo "[run] evaluator=$evaluator"
+  start_vllm "$evaluator" 4
   if ! check_ready; then
-    echo "[error] comparison_model $comparison_model failed to start"
+    echo "[error] evaluator $evaluator failed to start"
     stop_vllm
     continue
   fi
 
-  python "$SCRIPT_DIR/comparison_triple.py" \
-    --comparison-model "$comparison_model" \
-    --generator-models "${MODELS[@]}" \
+  python "$SCRIPT_DIR/prefer_individual.py" \
+    --evaluator-models "$evaluator" \
+    --generator-models "${GENERATOR_MODELS[@]}" \
     --human-dir "$HUMAN_DIR" \
     --generator-root "$GEN_ROOT" \
-    --output-root "$OUT_ROOT" \
+    --output-root "$OUT_ROOT_BASE" \
     --prefix "$PREFIX" \
     --base-url "$BASE_URL" \
     --api-key "$API_KEY" \

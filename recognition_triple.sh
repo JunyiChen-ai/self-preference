@@ -5,7 +5,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 PREFIX="/mnt/blob_output/v-junyichen"
 DATASET=${DATASET:-paper}
 if [[ "$DATASET" == "paper" ]]; then
-  DATASET_SUBDIR=""
+  DATASET_SUBDIR="paper"
 elif [[ "$DATASET" == "trans_seg" ]]; then
   DATASET_SUBDIR="news_segment"
 else
